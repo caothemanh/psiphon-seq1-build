@@ -40,75 +40,28 @@ jobs:
             https://github.com/golang/mobile.git \
             $HOME/mobile
 
-      # ── Patch mobile: Seq → Seq1 ──────────────────────────────────
-      - name: Patch mobile (Seq → Seq1)
+      - name: Patch mobile (Seq to Seq1)
         run: |
           cd $HOME/mobile
-
           find . -name "Seq.java" | while read f; do
             echo "Patching: $f"
             sed -i -e 's/\bclass Seq\b/class Seq1/g' \
                    -e 's/"GoSeq"/"GoSeq1"/g' "$f"
           done
-
           grep -rl 'go\.Seq\b\|"go/Seq"' . --include="*.go" | while read f; do
             echo "Patching: $f"
             sed -i -e 's|"go/Seq"|"go/Seq1"|g' \
                    -e 's|\bgo\.Seq\b|go.Seq1|g' "$f"
           done
-
           grep -rl 'go\.Universe\b\|"go/Universe"\|class Universe\b' . --include="*.go" | while read f; do
             echo "Patching: $f"
             sed -i -e 's|"go/Universe"|"go/Universe1"|g' \
                    -e 's|\bgo\.Universe\b|go.Universe1|g' \
                    -e 's|\bclass Universe\b|class Universe1|g' "$f"
           done
+          grep -rn 'go\.Seq[^1]' . --include="*.go" | grep -v "_test.go" || echo "OK no unpatched go.Seq"
 
-          echo "=== Verify ==="
-          grep -rn 'go\.Seq[^1]' . --include="*.go" | grep -v "_test.go" \
-            || echo "✅ No un-patched go.Seq"
-
-      # ── Tạo wrapper module riêng — tránh đụng go.mod psiphon ─────
-      - name: Create wrapper module
-        run: |
-          mkdir -p $HOME/psi-wrapper
-          cd $HOME/psi-wrapper
-
-          # go.mod của wrapper: dùng Go version cũ hơn để tránh tool directive
-          cat > go.mod << 'EOF'
-module psi-wrapper
-
-go 1.21
-
-require (
-    github.com/Psiphon-Labs/psiphon-tunnel-core v0.0.0
-    golang.org/x/mobile v0.0.0
-)
-
-replace (
-    github.com/Psiphon-Labs/psiphon-tunnel-core => /root/psiphon-tunnel-core
-    golang.org/x/mobile => /root/mobile
-)
-EOF
-
-          # Stub go.sum (sẽ được tạo bởi go mod tidy)
-          touch go.sum
-
-          # File dummy để module hợp lệ
-          cat > main.go << 'EOF'
-package main
-
-import _ "github.com/Psiphon-Labs/psiphon-tunnel-core/MobileLibrary/psi"
-
-func main() {}
-EOF
-
-          go mod tidy || true
-          echo "=== go.mod ==="
-          cat go.mod
-
-      # ── Build gomobile + gobind từ source đã patch ────────────────
-      - name: Build patched gomobile + gobind
+      - name: Build patched gomobile and gobind
         run: |
           cd $HOME/mobile
           go mod tidy
@@ -116,36 +69,48 @@ EOF
           go build -o $HOME/go/bin/gobind   ./cmd/gobind
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      # ── gomobile init trong wrapper module ────────────────────────
+      - name: Create wrapper module
+        run: |
+          mkdir -p $HOME/psi-wrapper
+          cd $HOME/psi-wrapper
+
+          printf 'module psi-wrapper\n\ngo 1.21\n\nrequire (\n\tgithub.com/Psiphon-Labs/psiphon-tunnel-core v0.0.0\n\tgolang.org/x/mobile v0.0.0\n)\n\nreplace (\n\tgithub.com/Psiphon-Labs/psiphon-tunnel-core => %s\n\tgolang.org/x/mobile => %s\n)\n' \
+            "$HOME/psiphon-tunnel-core" "$HOME/mobile" > go.mod
+
+          touch go.sum
+
+          printf 'package main\n\nimport _ "github.com/Psiphon-Labs/psiphon-tunnel-core/MobileLibrary/psi"\n\nfunc main() {}\n' > main.go
+
+          echo "=== go.mod ==="
+          cat go.mod
+
+          go mod tidy || true
+
       - name: gomobile init
         run: |
           export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018
           cd $HOME/psi-wrapper
           gomobile init
 
-      # ── Build AAR từ wrapper module ───────────────────────────────
       - name: Build Psiphon AAR
         run: |
           export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018
           cd $HOME/psi-wrapper
-
           gomobile bind \
             -target android/arm64,android/arm,android/386,android/amd64 \
             -androidapi 21 \
             -o $GITHUB_WORKSPACE/psiphon-seq1.aar \
             github.com/Psiphon-Labs/psiphon-tunnel-core/MobileLibrary/psi
 
-      # ── Verify ────────────────────────────────────────────────────
       - name: Verify AAR contains Seq1
         run: |
           unzip -p psiphon-seq1.aar classes.jar > /tmp/classes.jar
           echo "=== classes in AAR ==="
           jar tf /tmp/classes.jar | grep -E "Seq|Universe|psi|go/"
           jar tf /tmp/classes.jar | grep "Seq1" \
-            && echo "✅ go/Seq1 confirmed" \
-            || echo "❌ go/Seq1 NOT found"
+            && echo "OK go/Seq1 confirmed" \
+            || echo "FAIL go/Seq1 NOT found"
 
-      # ── Upload ────────────────────────────────────────────────────
       - name: Upload AAR artifact
         uses: actions/upload-artifact@v4
         with:
