@@ -40,7 +40,7 @@ jobs:
             https://github.com/golang/mobile.git \
             $HOME/mobile
 
-      - name: Patch mobile (Seq to Seq1 + bypass mobileModuleAvailable check)
+      - name: Patch mobile (Seq to Seq1 + bypass checks)
         run: |
           cd $HOME/mobile
 
@@ -49,23 +49,34 @@ jobs:
             sed -i -e 's/\bclass Seq\b/class Seq1/g' -e 's/"GoSeq"/"GoSeq1"/g' "$f"
           done
 
-          # 2. Patch .go files: go.Seq -> go.Seq1
+          # 2. Patch go.Seq -> go.Seq1
           grep -rl 'go\.Seq\b\|"go/Seq"' . --include="*.go" | while read f; do
             sed -i -e 's|"go/Seq"|"go/Seq1"|g' -e 's|\bgo\.Seq\b|go.Seq1|g' "$f"
           done
 
-          # 3. Patch .go files: go.Universe -> go.Universe1
+          # 3. Patch go.Universe -> go.Universe1
           grep -rl 'go\.Universe\b\|"go/Universe"\|class Universe\b' . --include="*.go" | while read f; do
             sed -i -e 's|"go/Universe"|"go/Universe1"|g' \
                    -e 's|\bgo\.Universe\b|go.Universe1|g' \
                    -e 's|\bclass Universe\b|class Universe1|g' "$f"
           done
 
-          # 4. Patch mobileModuleAvailable() trong bind.go: luôn return true
-          BIND_GO="cmd/gomobile/bind.go"
-          sed -i 's/func mobileModuleAvailable() bool {/func mobileModuleAvailable() bool { return true \/\//' "$BIND_GO"
-          echo "=== mobileModuleAvailable after patch ==="
-          grep -A3 "mobileModuleAvailable" "$BIND_GO" | head -10
+          # 4. Bypass mobileModuleAvailable check
+          sed -i 's/func mobileModuleAvailable() bool {/func mobileModuleAvailable() bool { return true \/\//' \
+            cmd/gomobile/bind.go
+
+          echo "=== Verify mobileModuleAvailable patch ==="
+          grep "mobileModuleAvailable" cmd/gomobile/bind.go | head -3
+
+      - name: Install mobile into GOPATH so gobind can find bind package
+        run: |
+          # gobind tìm golang.org/x/mobile/bind qua GOPATH, không qua module replace
+          # Cần đặt mobile clone vào đúng GOPATH path
+          mkdir -p $HOME/go/src/golang.org/x/
+          ln -s $HOME/mobile $HOME/go/src/golang.org/x/mobile
+          echo "GOPATH=$HOME/go" >> $GITHUB_ENV
+          echo "=== Verify ==="
+          ls $HOME/go/src/golang.org/x/mobile/bind/ | head -5
 
       - name: Build patched gomobile and gobind
         run: |
@@ -85,9 +96,7 @@ jobs:
             "$HOME/psiphon-tunnel-core" "$HOME/mobile" > go.mod
 
           touch go.sum
-
           printf 'package main\n\nfunc main() {}\n' > main.go
-
           go mod tidy || true
 
           echo "=== go.mod ==="
@@ -103,9 +112,12 @@ jobs:
         run: |
           export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018
           cd $HOME/psi-wrapper
+
+          # -tags android diperlukan agar package psi mengekspor symbols
           gomobile bind \
             -target android/arm64,android/arm,android/386,android/amd64 \
             -androidapi 21 \
+            -tags android \
             -o $GITHUB_WORKSPACE/psiphon-seq1.aar \
             github.com/Psiphon-Labs/psiphon-tunnel-core/MobileLibrary/psi
 
