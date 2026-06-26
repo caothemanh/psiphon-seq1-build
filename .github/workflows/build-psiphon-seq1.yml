@@ -40,25 +40,7 @@ jobs:
             https://github.com/golang/mobile.git \
             $HOME/mobile
 
-      # ── Inspect thực tế cấu trúc repo mobile ─────────────────────
-      - name: Inspect mobile repo structure
-        run: |
-          echo "=== Top level ==="
-          ls $HOME/mobile/
-          echo ""
-          echo "=== bind/ ==="
-          ls $HOME/mobile/bind/
-          echo ""
-          echo "=== bind/java/ ==="
-          ls $HOME/mobile/bind/java/
-          echo ""
-          echo "=== All .go files mentioning go.Seq ==="
-          grep -rl '"go\.Seq\|go/Seq\|go\.Universe\|go/Universe"' \
-            $HOME/mobile/ --include="*.go" 2>/dev/null || \
-          grep -rl 'go\.Seq\|go/Seq\|go\.Universe\|go/Universe' \
-            $HOME/mobile/ --include="*.go" | head -20
-
-      # ── Patch: dùng find thay vì hardcode path ───────────────────
+      # ── Patch mobile: Seq → Seq1 ──────────────────────────────────
       - name: Patch mobile (Seq → Seq1)
         run: |
           cd $HOME/mobile
@@ -70,11 +52,9 @@ jobs:
               -e 's/\bclass Seq\b/class Seq1/g' \
               -e 's/"GoSeq"/"GoSeq1"/g' \
               "$f"
-            grep -n "Seq1\|class Seq" "$f" | head -5
           done
 
-          echo ""
-          echo "=== Patch all .go files with go.Seq / go/Seq references ==="
+          echo "=== Patch .go files: go.Seq → go.Seq1 ==="
           grep -rl 'go\.Seq\b\|"go/Seq"' . --include="*.go" | while read f; do
             echo "Patching: $f"
             sed -i \
@@ -83,8 +63,7 @@ jobs:
               "$f"
           done
 
-          echo ""
-          echo "=== Patch all .go files with go.Universe / go/Universe references ==="
+          echo "=== Patch .go files: go.Universe → go.Universe1 ==="
           grep -rl 'go\.Universe\b\|"go/Universe"\|class Universe\b' . --include="*.go" | while read f; do
             echo "Patching: $f"
             sed -i \
@@ -94,10 +73,8 @@ jobs:
               "$f"
           done
 
-          echo ""
-          echo "=== Verify: remaining un-patched go.Seq refs ==="
-          grep -rn 'go\.Seq[^1]' . --include="*.go" | grep -v "_test.go" || echo "✅ None found"
-          grep -rn '"go/Seq"[^1]' . --include="*.go" || echo "✅ None found"
+          echo "=== Verify ==="
+          grep -rn 'go\.Seq[^1]' . --include="*.go" | grep -v "_test.go" || echo "✅ No un-patched go.Seq"
 
       # ── Build gomobile + gobind từ source đã patch ────────────────
       - name: Build patched gomobile + gobind
@@ -107,31 +84,36 @@ jobs:
           go build -o $HOME/go/bin/gomobile ./cmd/gomobile
           go build -o $HOME/go/bin/gobind   ./cmd/gobind
           echo "$HOME/go/bin" >> $GITHUB_PATH
-          echo "=== gomobile version ==="
-          $HOME/go/bin/gomobile version || true
 
-      # ── Inject replace vào go.mod psiphon ────────────────────────
-      - name: Inject replace directive
+      # ── Inject mobile vào go.mod psiphon đúng cách Go 1.26 ───────
+      - name: Inject mobile dependency (Go 1.26 style)
         run: |
           cd $HOME/psiphon-tunnel-core
 
-          if grep -q "golang.org/x/mobile" go.mod; then
-            go mod edit -replace=golang.org/x/mobile=$HOME/mobile
-            echo "✅ Replaced existing golang.org/x/mobile"
-          else
-            go mod edit -require=golang.org/x/mobile@v0.0.0
-            go mod edit -replace=golang.org/x/mobile=$HOME/mobile
-            echo "✅ Added + replaced golang.org/x/mobile"
-          fi
+          # Lấy version mobile thực tế từ repo đã clone
+          MOBILE_VERSION=$(cd $HOME/mobile && git log -1 --format="%H")
+          echo "Mobile commit: $MOBILE_VERSION"
 
-          go mod tidy || echo "⚠️  go mod tidy warning (continuing)"
-          echo "=== go.mod replace section ==="
-          grep -A2 "replace" go.mod || true
+          # Go 1.26: dùng go get -tool để thêm tool directive
+          # Nhưng trước tiên cần replace để trỏ vào local clone
+          go mod edit \
+            -require=golang.org/x/mobile@v0.0.0 \
+            -replace=golang.org/x/mobile=$HOME/mobile
+
+          # Thêm tool directive theo cách Go 1.26 yêu cầu
+          go mod edit -tool=golang.org/x/mobile/cmd/gobind
+          go mod edit -tool=golang.org/x/mobile/cmd/gomobile
+
+          go mod tidy || echo "⚠️ tidy warning"
+
+          echo "=== go.mod (tool + replace section) ==="
+          grep -E "tool|replace" go.mod || true
 
       # ── gomobile init ─────────────────────────────────────────────
       - name: gomobile init
         run: |
           export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018
+          cd $HOME/psiphon-tunnel-core
           gomobile init
 
       # ── Build AAR ─────────────────────────────────────────────────
