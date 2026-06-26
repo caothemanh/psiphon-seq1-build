@@ -1,0 +1,164 @@
+name: Build Psiphon AAR (go.Seq1)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Go 1.26 ──────────────────────────────────────────────────
+      - name: Setup Go 1.26
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+
+      # ── Android SDK + NDK ─────────────────────────────────────────
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK 27
+        run: |
+          sdkmanager --install "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
+
+      # ── Clone psiphon-tunnel-core ─────────────────────────────────
+      - name: Clone psiphon-tunnel-core
+        run: |
+          git clone --depth=1 \
+            https://github.com/Psiphon-Labs/psiphon-tunnel-core.git \
+            $HOME/psiphon-tunnel-core
+
+      # ── Clone golang.org/x/mobile để patch ───────────────────────
+      - name: Clone golang.org/x/mobile
+        run: |
+          git clone --depth=1 \
+            https://github.com/golang/mobile.git \
+            $HOME/mobile
+
+      # ── Patch mobile: Seq → Seq1, Universe → Universe1 ───────────
+      - name: Patch gomobile (Seq → Seq1)
+        run: |
+          cd $HOME/mobile
+
+          # 1. Seq.java: đổi tên class và tất cả self-reference
+          sed -i \
+            -e 's/\bclass Seq\b/class Seq1/g' \
+            -e 's/\bSeq\.RefTracker\b/Seq1.RefTracker/g' \
+            -e 's/\bSeq\.GoRef\b/Seq1.GoRef/g' \
+            -e 's/\bSeq\.GoObject\b/Seq1.GoObject/g' \
+            -e 's/\bSeq\.Proxy\b/Seq1.Proxy/g' \
+            -e 's/\bSeq\.Ref\b/Seq1.Ref/g' \
+            -e 's/\bSeq\.RefMap\b/Seq1.RefMap/g' \
+            -e 's/\bSeq\.GoRefQueue\b/Seq1.GoRefQueue/g' \
+            bind/java/Seq.java
+
+          # 2. Universe.java: đổi tên class
+          sed -i \
+            -e 's/\bclass Universe\b/class Universe1/g' \
+            bind/java/Universe.java
+
+          # 3. javagen.go: đổi tất cả reference đến go.Seq và go.Universe
+          sed -i \
+            -e 's|"go/Seq"|"go/Seq1"|g' \
+            -e 's|go\.Seq\b|go.Seq1|g' \
+            -e 's|"go/Universe"|"go/Universe1"|g' \
+            -e 's|go\.Universe\b|go.Universe1|g' \
+            bind/javagen.go
+
+          # 4. Các file generator khác có thể reference go.Seq
+          grep -rl '"go/Seq"' . --include="*.go" | xargs -I{} sed -i \
+            -e 's|"go/Seq"|"go/Seq1"|g' \
+            -e 's|go\.Seq\b|go.Seq1|g' \
+            {}
+
+          grep -rl 'go\.Universe' . --include="*.go" | xargs -I{} sed -i \
+            -e 's|go\.Universe\b|go.Universe1|g' \
+            {}
+
+          echo "=== Verify patch ==="
+          grep -n "Seq1\|Seq " bind/java/Seq.java | head -10
+          grep -n "Seq1\|go/Seq" bind/javagen.go | head -10
+
+      # ── Build gomobile từ source đã patch ─────────────────────────
+      - name: Build patched gomobile
+        run: |
+          cd $HOME/mobile
+          # Cần go.mod riêng cho mobile
+          go mod tidy
+          go build -o $HOME/go/bin/gomobile ./cmd/gomobile
+          go build -o $HOME/go/bin/gobind   ./cmd/gobind
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+          echo "=== gomobile version ==="
+          $HOME/go/bin/gomobile version || true
+
+      # ── Thêm replace directive vào go.mod của psiphon ────────────
+      - name: Inject replace directive
+        run: |
+          cd $HOME/psiphon-tunnel-core/MobileLibrary/psi
+
+          # Kiểm tra go.mod có tồn tại không
+          if [ ! -f go.mod ]; then
+            # psi/ dùng go.mod từ root
+            cd $HOME/psiphon-tunnel-core
+          fi
+
+          # Thêm replace để dùng mobile đã patch
+          go mod edit -replace=golang.org/x/mobile=$HOME/mobile
+          go mod tidy || true
+
+          echo "=== go.mod after replace ==="
+          grep -A2 "replace" go.mod
+
+      # ── gomobile init ─────────────────────────────────────────────
+      - name: gomobile init
+        run: |
+          cd $HOME/psiphon-tunnel-core/MobileLibrary/psi
+          gomobile init || true
+
+      # ── Build AAR ─────────────────────────────────────────────────
+      - name: Build Psiphon AAR
+        run: |
+          cd $HOME/psiphon-tunnel-core/MobileLibrary/psi
+
+          gomobile bind \
+            -target android/arm64,android/arm,android/386,android/amd64 \
+            -androidapi 21 \
+            -tags "PSIPHON_ENABLE_QUIC PSIPHON_ENABLE_INPROXY" \
+            -o $GITHUB_WORKSPACE/psiphon-seq1.aar \
+            github.com/Psiphon-Labs/psiphon-tunnel-core/MobileLibrary/psi
+
+      # ── Verify output ──────────────────────────────────────────────
+      - name: Verify AAR contains Seq1
+        run: |
+          cd $GITHUB_WORKSPACE
+          unzip -p psiphon-seq1.aar classes.jar > /tmp/classes.jar
+          jar tf /tmp/classes.jar | grep -E "Seq|Universe|psi"
+          echo ""
+          echo "=== Check Seq1 exists ==="
+          jar tf /tmp/classes.jar | grep Seq1 && echo "✅ Seq1 found" || echo "❌ Seq1 NOT found"
+          jar tf /tmp/classes.jar | grep -v Seq1 | grep Seq && echo "⚠️  plain Seq still exists" || echo "✅ no plain Seq"
+
+      # ── Upload artifact ───────────────────────────────────────────
+      - name: Upload AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: psiphon-seq1-aar
+          path: |
+            psiphon-seq1.aar
+            psiphon-seq1-sources.jar
+
+      # ── Release (optional) ────────────────────────────────────────
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: psiphon-seq1.aar
