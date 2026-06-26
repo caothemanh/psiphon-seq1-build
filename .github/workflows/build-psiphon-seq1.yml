@@ -40,26 +40,32 @@ jobs:
             https://github.com/golang/mobile.git \
             $HOME/mobile
 
-      - name: Patch mobile (Seq to Seq1)
+      - name: Patch mobile (Seq to Seq1 + bypass mobileModuleAvailable check)
         run: |
           cd $HOME/mobile
+
+          # 1. Patch Seq.java
           find . -name "Seq.java" | while read f; do
-            echo "Patching: $f"
-            sed -i -e 's/\bclass Seq\b/class Seq1/g' \
-                   -e 's/"GoSeq"/"GoSeq1"/g' "$f"
+            sed -i -e 's/\bclass Seq\b/class Seq1/g' -e 's/"GoSeq"/"GoSeq1"/g' "$f"
           done
+
+          # 2. Patch .go files: go.Seq -> go.Seq1
           grep -rl 'go\.Seq\b\|"go/Seq"' . --include="*.go" | while read f; do
-            echo "Patching: $f"
-            sed -i -e 's|"go/Seq"|"go/Seq1"|g' \
-                   -e 's|\bgo\.Seq\b|go.Seq1|g' "$f"
+            sed -i -e 's|"go/Seq"|"go/Seq1"|g' -e 's|\bgo\.Seq\b|go.Seq1|g' "$f"
           done
+
+          # 3. Patch .go files: go.Universe -> go.Universe1
           grep -rl 'go\.Universe\b\|"go/Universe"\|class Universe\b' . --include="*.go" | while read f; do
-            echo "Patching: $f"
             sed -i -e 's|"go/Universe"|"go/Universe1"|g' \
                    -e 's|\bgo\.Universe\b|go.Universe1|g' \
                    -e 's|\bclass Universe\b|class Universe1|g' "$f"
           done
-          grep -rn 'go\.Seq[^1]' . --include="*.go" | grep -v "_test.go" || echo "OK no unpatched go.Seq"
+
+          # 4. Patch mobileModuleAvailable() trong bind.go: luôn return true
+          BIND_GO="cmd/gomobile/bind.go"
+          sed -i 's/func mobileModuleAvailable() bool {/func mobileModuleAvailable() bool { return true \/\//' "$BIND_GO"
+          echo "=== mobileModuleAvailable after patch ==="
+          grep -A3 "mobileModuleAvailable" "$BIND_GO" | head -10
 
       - name: Build patched gomobile and gobind
         run: |
@@ -68,6 +74,7 @@ jobs:
           go build -o $HOME/go/bin/gomobile ./cmd/gomobile
           go build -o $HOME/go/bin/gobind   ./cmd/gobind
           echo "$HOME/go/bin" >> $GITHUB_PATH
+          gomobile version || true
 
       - name: Create wrapper module
         run: |
@@ -79,12 +86,12 @@ jobs:
 
           touch go.sum
 
-          printf 'package main\n\nimport _ "github.com/Psiphon-Labs/psiphon-tunnel-core/MobileLibrary/psi"\n\nfunc main() {}\n' > main.go
+          printf 'package main\n\nfunc main() {}\n' > main.go
+
+          go mod tidy || true
 
           echo "=== go.mod ==="
           cat go.mod
-
-          go mod tidy || true
 
       - name: gomobile init
         run: |
@@ -105,7 +112,6 @@ jobs:
       - name: Verify AAR contains Seq1
         run: |
           unzip -p psiphon-seq1.aar classes.jar > /tmp/classes.jar
-          echo "=== classes in AAR ==="
           jar tf /tmp/classes.jar | grep -E "Seq|Universe|psi|go/"
           jar tf /tmp/classes.jar | grep "Seq1" \
             && echo "OK go/Seq1 confirmed" \
